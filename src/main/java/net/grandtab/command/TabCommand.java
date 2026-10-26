@@ -40,6 +40,7 @@ import java.util.UUID;
  * /tabrank role &lt;id&gt; name|color &lt;value&gt; | role &lt;id&gt; bold true|false
  * /tabrank title|subtitle|discord|website &lt;text&gt;
  * /tabrank source tabrank|serverutilities|both
+ * /tabrank nametag inline|above|below|on|off
  * /tabrank cleanup                         remove floating labels left by 1.0.0-b1 to b3
  * /tabrank enable | disable | reload | version
  * </pre>
@@ -116,6 +117,12 @@ public final class TabCommand {
                 .then(Commands.literal("disable").executes(ctx -> setEnabled(ctx, false)))
                 .then(Commands.literal("reload").executes(TabCommand::reload))
                 .then(Commands.literal("cleanup").executes(TabCommand::cleanup))
+                .then(Commands.literal("nametag")
+                        .then(Commands.literal("inline").executes(ctx -> nametag(ctx, "INLINE", true)))
+                        .then(Commands.literal("above").executes(ctx -> nametag(ctx, "ABOVE", true)))
+                        .then(Commands.literal("below").executes(ctx -> nametag(ctx, "BELOW", true)))
+                        .then(Commands.literal("on").executes(ctx -> nametag(ctx, null, true)))
+                        .then(Commands.literal("off").executes(ctx -> nametag(ctx, null, false))))
                 .then(Commands.literal("version").executes(ctx -> ok(ctx, "Grand Tab List " + GrandTab.version()))));
     }
 
@@ -333,6 +340,16 @@ public final class TabCommand {
     private static int setEnabled(CommandContext<CommandSource> ctx, boolean enabled) {
         GrandTab.store().config().enabled = enabled;
         return saved(ctx, enabled ? "Custom tab list enabled." : "Custom tab list disabled (vanilla tab list).");
+    }
+
+    private static int nametag(CommandContext<CommandSource> ctx, String position, boolean enabled) {
+        TabConfig.Nametags n = GrandTab.store().config().gradients.nametags;
+        n.enabled = enabled;
+        if (position != null) {
+            n.position = position;
+        }
+        return saved(ctx, !enabled ? "Rank labels over heads are off (vanilla nametags)."
+                : "Rank labels over heads: " + n.position.toLowerCase(Locale.ROOT) + ".");
     }
 
     /** Removes real label entities left by 1.0.0-b1 to b3 (only those carrying this mod's tag). */

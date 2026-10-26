@@ -7,14 +7,17 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.item.ArmorStandEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
-import net.minecraft.nbt.CompoundNBT;
 import net.minecraft.network.IPacket;
 import net.minecraft.network.PacketBuffer;
 import net.minecraft.network.play.server.SDestroyEntitiesPacket;
 import net.minecraft.network.play.server.SEntityMetadataPacket;
 import net.minecraft.network.play.server.SSetPassengersPacket;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.text.Color;
+import net.minecraft.util.text.IFormattableTextComponent;
 import net.minecraft.util.text.ITextComponent;
+import net.minecraft.util.text.StringTextComponent;
+import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.server.ServerWorld;
 import net.minecraftforge.fml.network.PacketDistributor;
 
@@ -58,9 +61,10 @@ import java.util.UUID;
  *   <li>name, animation frames and sneaking visibility are metadata updates to the same
  *   clients.</li>
  * </ul>
- * BELOW: one marker armour stand riding the player (name about 1.85 blocks up, under the
- * player's name). ABOVE: two radius-0 area-effect clouds and the stand (name about 2.6 blocks
- * up, above the player's name). A player never sees their own label (like vanilla nametags).
+ * Minecraft does not draw the nametag of a living entity that has a rider, so the label carries
+ * the player's name as well: INLINE "[K3 WARDEN] Name" at the normal nametag height (default),
+ * or two lines (ABOVE: prefix over the name, BELOW: prefix under the name). A player never sees
+ * their own label (like vanilla nametags).
  */
 public final class NametagDisplay {
     /** Tag of the real label entities created by 1.0.0-b1 to b3; any such entity is a leftover. */
@@ -148,7 +152,7 @@ public final class NametagDisplay {
             }
             return;
         }
-        String position = "BELOW".equalsIgnoreCase(settings().position) ? "BELOW" : "ABOVE";
+        String position = layout(settings().position);
         if (label == null || !label.position.equals(position) || label.player != player) {
             if (label != null) {
                 hide(label); // the old player object (respawn) or the old layout
@@ -167,17 +171,24 @@ public final class NametagDisplay {
         }
         boolean metadataChanged = false;
         if (render || label.json == null) {
-            ITextComponent text = prefix.text;
-            String json = ITextComponent.Serializer.toJson(text);
-            if (!json.equals(label.json)) {
-                label.top().setCustomName(text);
-                label.json = json;
+            List<ITextComponent> texts = texts(label.position, prefix, player);
+            StringBuilder key = new StringBuilder();
+            for (ITextComponent t : texts) {
+                key.append(ITextComponent.Serializer.toJson(t)).append('|');
+            }
+            if (!key.toString().equals(label.json)) {
+                for (int i = 0; i < label.parts.size(); i++) {
+                    label.parts.get(i).setCustomName(texts.get(i));
+                }
+                label.json = key.toString();
                 metadataChanged = true;
             }
         }
         boolean nameVisible = !player.isSneaking(); // like vanilla: no label through walls while sneaking
         if (nameVisible != label.nameVisible) {
-            label.top().setCustomNameVisible(nameVisible);
+            for (Entity part : label.parts) {
+                part.setCustomNameVisible(nameVisible);
+            }
             label.nameVisible = nameVisible;
             metadataChanged = true;
         }
@@ -188,7 +199,9 @@ public final class NametagDisplay {
             return;
         }
         if (metadataChanged) {
-            sendToTrackers(player, new SEntityMetadataPacket(label.top().getEntityId(), label.top().getDataManager(), true));
+            for (Entity part : label.parts) {
+                sendToTrackers(player, new SEntityMetadataPacket(part.getEntityId(), part.getDataManager(), true));
+            }
         }
         List<Integer> real = realPassengers(player);
         if (!real.equals(label.realPassengers)) {
@@ -200,37 +213,66 @@ public final class NametagDisplay {
 
     // ------------------------------------------------------------------ label entities (client-side only)
 
+    /** INLINE (default), ABOVE or BELOW. */
+    static String layout(String configured) {
+        if ("ABOVE".equalsIgnoreCase(configured)) {
+            return "ABOVE";
+        }
+        if ("BELOW".equalsIgnoreCase(configured)) {
+            return "BELOW";
+        }
+        return "INLINE";
+    }
+
+    /**
+     * Texts of the label lines, bottom to top. Minecraft hides the nametag of any living entity
+     * that has a rider, so while a label rides a player the label also carries the player's name:
+     * INLINE "[K3 WARDEN] Name" on one line at the normal nametag height; ABOVE the name line with
+     * the prefix line over it; BELOW the prefix line with the name line over it.
+     */
+    private List<ITextComponent> texts(String layout, TabService.Prefix prefix, ServerPlayerEntity player) {
+        IFormattableTextComponent name = new StringTextComponent(player.getGameProfile().getName());
+        final int rgb = prefix.nameColor;
+        name.modifyStyle(st -> st.setColor(Color.fromInt(rgb)));
+        if (service.config().players.nameBold) {
+            name.mergeStyle(TextFormatting.BOLD);
+        }
+        List<ITextComponent> lines = new ArrayList<>();
+        if (layout.equals("INLINE")) {
+            IFormattableTextComponent line = new StringTextComponent("");
+            line.appendSibling(prefix.text);
+            line.appendSibling(new StringTextComponent(" "));
+            line.appendSibling(name);
+            lines.add(line);
+        } else if (layout.equals("ABOVE")) {
+            lines.add(name);
+            lines.add(prefix.text);
+        } else {
+            lines.add(prefix.text);
+            lines.add(name);
+        }
+        return lines;
+    }
+
+    /**
+     * One radius-0 area-effect cloud per line (no model, no hitbox, no particles). The first rides
+     * the player: its name renders 1.0 block above a point 0.75 x player height up, i.e. where
+     * the vanilla nametag would be (2.35 vs 2.3 blocks; lower while sneaking, like vanilla). Each
+     * further cloud rides the one below it, 0.375 blocks higher: one text line up.
+     */
     private Label create(ServerPlayerEntity player, String position) {
         ServerWorld world = player.getServerWorld();
         List<Entity> parts = new ArrayList<>();
-        if (position.equals("ABOVE")) {
-            parts.add(cloud(world));
-            parts.add(cloud(world));
-        }
-        parts.add(marker(world));
-        for (Entity e : parts) {
-            if (e == null) {
+        int lines = position.equals("INLINE") ? 1 : 2;
+        for (int i = 0; i < lines; i++) {
+            AreaEffectCloudEntity cloud = cloud(world);
+            if (cloud == null) {
                 return null;
             }
+            cloud.setCustomNameVisible(true);
+            parts.add(cloud);
         }
         return new Label(position, parts, player);
-    }
-
-    private static ArmorStandEntity marker(ServerWorld world) {
-        ArmorStandEntity stand = EntityType.ARMOR_STAND.create(world);
-        if (stand == null) {
-            return null;
-        }
-        CompoundNBT nbt = stand.writeWithoutTypeId(new CompoundNBT());
-        nbt.putBoolean("Marker", true);
-        nbt.putBoolean("Invisible", true);
-        nbt.putBoolean("NoGravity", true);
-        nbt.putBoolean("Invulnerable", true);
-        nbt.putBoolean("Silent", true);
-        nbt.putBoolean("NoBasePlate", true);
-        stand.read(nbt);
-        stand.setCustomNameVisible(true);
-        return stand;
     }
 
     private static AreaEffectCloudEntity cloud(ServerWorld world) {

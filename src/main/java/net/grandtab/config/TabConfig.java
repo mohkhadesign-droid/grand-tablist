@@ -45,8 +45,11 @@ public final class TabConfig {
     /** Rank prefix floating over each player's head (marker entities, no scoreboard teams). */
     public static final class Nametags {
         public boolean enabled = true;
-        /** ABOVE (over the player's name) or BELOW (between the name and the head). */
-        public String position = "ABOVE";
+        /**
+         * INLINE: "[K3 WARDEN] Name" on one line where the vanilla nametag is (default).
+         * ABOVE: the name with the prefix on a line above it. BELOW: the prefix under the name.
+         */
+        public String position = "INLINE";
         /** Also show prefixes that have no gradient (plain Server Utilities / tabrank colours). */
         public boolean showAllPrefixes = true;
     }
@@ -172,7 +175,7 @@ public final class TabConfig {
             gradients.nametags = new Nametags();
         }
         if (gradients.nametags.position == null) {
-            gradients.nametags.position = "ABOVE";
+            gradients.nametags.position = "INLINE";
         }
         gradients.frameTicks = Math.max(2, Math.min(100, gradients.frameTicks));
         if (footer == null) {
