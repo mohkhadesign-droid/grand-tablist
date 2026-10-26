@@ -159,12 +159,25 @@ public final class TabLogic {
     private static final int[] LEGACY = {0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA,
             0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF};
 
+    /** Server Utilities' &amp;g rainbow colour cycle (CustTextFormatting.rainbow in 2.8.0). */
+    public static final String SU_RAINBOW = "4c6e2ab319d5";
+
+    public static List<Segment> parseLegacy(String text) {
+        return parseLegacy(text, "");
+    }
+
     /**
      * Splits text with Minecraft legacy codes (&amp; or the section sign, colours 0-f, k l m n o r,
      * and &amp;#RRGGBB) into styled segments. Unknown codes stay as plain text. As in vanilla, a
      * colour code resets the formatting codes.
+     *
+     * <p>Server Utilities 2.8.0 also has two codes of its own, reproduced here the way its
+     * TextUtils.formatString applies them: &amp;g colours each following character with the next
+     * colour of the cycle 4c6e2ab319d5 (spaces included), &amp;h does the same with this month's
+     * "holiday" colours ({@code holidayCodes}, read from its config; the rainbow if empty). Both
+     * last until the next code.
      */
-    public static List<Segment> parseLegacy(String text) {
+    public static List<Segment> parseLegacy(String text, String holidayCodes) {
         List<Segment> out = new ArrayList<>();
         if (text == null) {
             return out;
@@ -172,6 +185,8 @@ public final class TabLogic {
         StringBuilder run = new StringBuilder();
         Integer color = null;
         boolean bold = false, italic = false, underlined = false, strike = false, obf = false;
+        String cycle = null;
+        int cycleIndex = 0;
         int i = 0;
         while (i < text.length()) {
             char c = text.charAt(i);
@@ -185,7 +200,7 @@ public final class TabLogic {
                 } else if (CODES.indexOf(code) >= 0) {
                     newColor = LEGACY[CODES.indexOf(code)];
                     consumed = 2;
-                } else if ("klmnor".indexOf(code) >= 0) {
+                } else if ("klmnorgh".indexOf(code) >= 0) {
                     consumed = 2;
                 }
                 if (consumed > 0) {
@@ -193,12 +208,19 @@ public final class TabLogic {
                         out.add(new Segment(run.toString(), color, bold, italic, underlined, strike, obf));
                         run.setLength(0);
                     }
+                    cycle = null;
                     if (newColor != null) {
                         color = newColor;
                         bold = italic = underlined = strike = obf = false;
                     } else if (code == 'r') {
                         color = null;
                         bold = italic = underlined = strike = obf = false;
+                    } else if (code == 'g' || code == 'h') {
+                        String codes = code == 'h' && holidayCodes != null && !holidayCodes.trim().isEmpty()
+                                ? holidayCodes.trim().toLowerCase(Locale.ROOT) : SU_RAINBOW;
+                        cycle = codes;
+                        cycleIndex = 0;
+                        bold = italic = underlined = strike = obf = false; // each character gets a colour code
                     } else if (code == 'l') {
                         bold = true;
                     } else if (code == 'o') {
@@ -214,13 +236,26 @@ public final class TabLogic {
                     continue;
                 }
             }
-            run.append(c);
+            if (cycle != null) {
+                char cc = cycle.charAt(cycleIndex % cycle.length());
+                cycleIndex++;
+                int idx = CODES.indexOf(cc);
+                color = idx >= 0 ? LEGACY[idx] : 0xFFFFFF;
+                out.add(new Segment(String.valueOf(c), color, false, false, false, false, false));
+            } else {
+                run.append(c);
+            }
             i++;
         }
         if (run.length() > 0) {
             out.add(new Segment(run.toString(), color, bold, italic, underlined, strike, obf));
         }
         return out;
+    }
+
+    /** Legacy hex colour code for a colour, e.g. &amp;#FFAA00. */
+    public static String legacyHex(int rgb) {
+        return "&" + formatColor(rgb);
     }
 
     /** Text without legacy codes (for comparisons and logs). */

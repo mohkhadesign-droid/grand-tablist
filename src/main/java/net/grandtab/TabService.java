@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelPipeline;
 import net.grandtab.config.ConfigStore;
 import net.grandtab.config.TabConfig;
+import net.grandtab.logic.GradientLogic;
 import net.grandtab.logic.TabLogic;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.network.PacketBuffer;
@@ -49,6 +50,13 @@ public final class TabService {
     private final Map<UUID, String> packStatus = new ConcurrentHashMap<>();
     private final Map<UUID, String> sentHeaders = new HashMap<>();
     private final Map<UUID, String> sentNames = new HashMap<>();
+    /** Names computed in the last refresh (TabListNameFormat returns these). */
+    private final Map<UUID, ITextComponent> names = new HashMap<>();
+    private final Map<UUID, ServerUtilitiesBridge.SuRank> suCache = new HashMap<>();
+    private final java.util.Set<UUID> animatedPlayers = new java.util.HashSet<>();
+    private String holidayCodes = "";
+    private long frame;
+    private NametagDisplay nametags;
     private volatile boolean dirty = true;
     private long ticks;
 
@@ -73,11 +81,23 @@ public final class TabService {
 
     public void start() {
         cleanupTeams(!config().players.sortByRank);
+        nametags = new NametagDisplay(server, this);
         dirty = true;
     }
 
     public void stop() {
         cleanupTeams(true);
+        if (nametags != null) {
+            nametags.stop();
+        }
+    }
+
+    public NametagDisplay nametags() {
+        return nametags;
+    }
+
+    public long frame() {
+        return frame;
     }
 
     public void tick() {
@@ -85,9 +105,18 @@ public final class TabService {
         TabConfig cfg = config();
         boolean refresh = dirty || ticks % cfg.updateIntervalTicks == 0;
         boolean ping = ticks % cfg.pingUpdateIntervalTicks == 0;
+        boolean newFrame = ticks % cfg.gradients.frameTicks == 0;
+        if (newFrame) {
+            frame++;
+        }
         if (refresh) {
             dirty = false;
             refreshAll();
+        } else if (newFrame && !animatedPlayers.isEmpty()) {
+            refreshNames(true);
+        }
+        if (nametags != null) {
+            nametags.tick(ticks, refresh, newFrame);
         }
         if (ping && cfg.enabled) {
             List<ServerPlayerEntity> players = server.getPlayerList().getPlayers();
@@ -95,7 +124,7 @@ public final class TabService {
                 server.getPlayerList().sendPacketToAllPlayers(
                         new SPlayerListItemPacket(SPlayerListItemPacket.Action.UPDATE_LATENCY, players));
                 if (cfg.players.showPingMs && !refresh) {
-                    refreshNames();
+                    refreshNames(false);
                 }
             }
         }
@@ -103,21 +132,46 @@ public final class TabService {
 
     private void refreshAll() {
         TabConfig cfg = config();
+        holidayCodes = ServerUtilitiesBridge.holidayCodes();
+        suCache.clear();
         for (ServerPlayerEntity player : server.getPlayerList().getPlayers()) {
             sendHeader(player);
+            suCache.put(player.getUniqueID(), ServerUtilitiesBridge.rankOf(player.getUniqueID()));
         }
-        refreshNames();
+        refreshNames(false);
         if (cfg.enabled && cfg.players.sortByRank) {
             applySortTeams();
         }
     }
 
-    private void refreshNames() {
+    /**
+     * Recomputes tab names and sends only those that changed. With {@code onlyAnimated}, only
+     * players whose prefix is animated are looked at (each animation frame).
+     */
+    private void refreshNames(boolean onlyAnimated) {
+        if (!onlyAnimated) {
+            animatedPlayers.clear();
+        }
         for (ServerPlayerEntity player : server.getPlayerList().getPlayers()) {
-            ITextComponent name = displayName(player);
+            UUID id = player.getUniqueID();
+            if (onlyAnimated && !animatedPlayers.contains(id)) {
+                continue;
+            }
+            ITextComponent name = buildName(player);
+            if (!onlyAnimated && config().enabled && config().gradients.inTabList) {
+                Prefix prefix = prefixOf(player);
+                if (prefix != null && prefix.animated) {
+                    animatedPlayers.add(id);
+                }
+            }
             String json = name == null ? "" : ITextComponent.Serializer.toJson(name);
-            if (!json.equals(sentNames.get(player.getUniqueID()))) {
-                sentNames.put(player.getUniqueID(), json);
+            if (!json.equals(sentNames.get(id))) {
+                sentNames.put(id, json);
+                if (name == null) {
+                    names.remove(id);
+                } else {
+                    names.put(id, name);
+                }
                 player.refreshTabListName(); // fires TabListNameFormat and sends the update to everyone
             }
         }
@@ -127,6 +181,7 @@ public final class TabService {
         installPackListener(player);
         sentHeaders.remove(player.getUniqueID());
         sentNames.remove(player.getUniqueID());
+        names.remove(player.getUniqueID());
         dirty = true;
     }
 
@@ -134,6 +189,12 @@ public final class TabService {
         packStatus.remove(player.getUniqueID());
         sentHeaders.remove(player.getUniqueID());
         sentNames.remove(player.getUniqueID());
+        names.remove(player.getUniqueID());
+        suCache.remove(player.getUniqueID());
+        animatedPlayers.remove(player.getUniqueID());
+        if (nametags != null) {
+            nametags.onLogout(player);
+        }
         dirty = true; // the online count drops on the next tick, when the player is gone
     }
 
@@ -314,56 +375,150 @@ public final class TabService {
         if (!useServerUtilities() || (useTabRank() && rankOf(player) != null)) {
             return null;
         }
-        ServerUtilitiesBridge.SuRank su = ServerUtilitiesBridge.rankOf(player);
+        ServerUtilitiesBridge.SuRank su = suCache.containsKey(player) ? suCache.get(player) : ServerUtilitiesBridge.rankOf(player);
         return su == null || su.prefix.isEmpty() ? null : su;
     }
 
-    private static IFormattableTextComponent legacy(String text) {
+    /** One character of a prefix with its formatting (colours are replaced by a gradient). */
+    private static final class StyledChar {
+        final String ch;
+        final boolean bold;
+        final boolean italic;
+        final boolean underlined;
+        final boolean obfuscated;
+        final Integer color;
+
+        StyledChar(String ch, boolean bold, boolean italic, boolean underlined, boolean obfuscated, Integer color) {
+            this.ch = ch;
+            this.bold = bold;
+            this.italic = italic;
+            this.underlined = underlined;
+            this.obfuscated = obfuscated;
+            this.color = color;
+        }
+    }
+
+    private List<StyledChar> chars(String legacyText) {
+        List<StyledChar> out = new ArrayList<>();
+        for (TabLogic.Segment seg : TabLogic.parseLegacy(legacyText, holidayCodes)) {
+            int[] cps = seg.text.codePoints().toArray();
+            for (int cp : cps) {
+                out.add(new StyledChar(new String(Character.toChars(cp)), seg.bold, seg.italic, seg.underlined, seg.obfuscated, seg.color));
+            }
+        }
+        return out;
+    }
+
+    /** Builds a component; with a gradient, each character's colour comes from it. */
+    private static IFormattableTextComponent render(List<StyledChar> chars, int[] gradient, Boolean forceBold) {
         IFormattableTextComponent root = new StringTextComponent("");
-        for (TabLogic.Segment seg : TabLogic.parseLegacy(text)) {
-            IFormattableTextComponent part = new StringTextComponent(seg.text);
-            if (seg.color != null) {
-                final int rgb = seg.color;
+        int i = 0;
+        while (i < chars.size()) {
+            StyledChar first = chars.get(i);
+            Integer color = gradient != null ? Integer.valueOf(gradient[i]) : first.color;
+            boolean bold = forceBold != null ? forceBold : first.bold;
+            StringBuilder run = new StringBuilder(first.ch);
+            int j = i + 1;
+            while (j < chars.size()) {
+                StyledChar c = chars.get(j);
+                Integer cc = gradient != null ? Integer.valueOf(gradient[j]) : c.color;
+                boolean cb = forceBold != null ? forceBold : c.bold;
+                if (!java.util.Objects.equals(cc, color) || cb != bold || c.italic != first.italic
+                        || c.underlined != first.underlined || c.obfuscated != first.obfuscated) {
+                    break;
+                }
+                run.append(c.ch);
+                j++;
+            }
+            IFormattableTextComponent part = new StringTextComponent(run.toString());
+            if (color != null) {
+                final int rgb = color;
                 part.modifyStyle(style -> style.setColor(Color.fromInt(rgb)));
             }
-            if (seg.bold) {
+            if (bold) {
                 part.mergeStyle(TextFormatting.BOLD);
             }
-            if (seg.italic) {
+            if (first.italic) {
                 part.mergeStyle(TextFormatting.ITALIC);
             }
-            if (seg.underlined) {
+            if (first.underlined) {
                 part.mergeStyle(TextFormatting.UNDERLINE);
             }
-            if (seg.strikethrough) {
-                part.mergeStyle(TextFormatting.STRIKETHROUGH);
-            }
-            if (seg.obfuscated) {
+            if (first.obfuscated) {
                 part.mergeStyle(TextFormatting.OBFUSCATED);
             }
             root.appendSibling(part);
+            i = j;
         }
         return root;
     }
 
-    /** Tab-list name, or null to leave the vanilla name (display disabled). */
-    public ITextComponent displayName(ServerPlayerEntity player) {
-        TabConfig cfg = config();
-        if (!cfg.enabled) {
+    /** Colour stops of a gradient, or null if invalid. */
+    public static List<Integer> stops(ConfigStore.GradientDef def) {
+        if (def == null || def.colors == null || def.colors.size() < 2) {
             return null;
         }
-        TabConfig.Players p = cfg.players;
-        String name = player.getGameProfile().getName();
+        List<Integer> stops = new ArrayList<>();
+        for (String c : def.colors) {
+            try {
+                stops.add(GradientLogic.parseHex(c));
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+        return stops;
+    }
+
+    /** A prefix rendered with a gradient at the current frame (also used for previews). */
+    public IFormattableTextComponent gradientText(String legacyText, ConfigStore.GradientDef def) {
+        List<StyledChar> chars = chars(legacyText);
+        List<Integer> stops = stops(def);
+        if (stops == null) {
+            return render(chars, null, null);
+        }
+        GradientLogic.Animation anim = GradientLogic.parseAnimation(def.animation);
+        int[] colors = GradientLogic.colors(stops, anim, chars.size(), GradientLogic.phase(frame, def.speed));
+        return render(chars, colors, def.bold);
+    }
+
+    /** What is shown in front of a player's name: the prefix and the name colour. */
+    public static final class Prefix {
+        public final IFormattableTextComponent text;
+        public final int nameColor;
+        public final boolean animated;
+        /** Raw Server Utilities prefix when it came from there (for chat), else null. */
+        public final String suPrefix;
+        public final ConfigStore.GradientDef gradient;
+
+        Prefix(IFormattableTextComponent text, int nameColor, boolean animated, String suPrefix, ConfigStore.GradientDef gradient) {
+            this.text = text;
+            this.nameColor = nameColor;
+            this.animated = animated;
+            this.suPrefix = suPrefix;
+            this.gradient = gradient;
+        }
+    }
+
+    /** Gradient keys that apply to a /tabrank rank: "K1.monarch", then "monarch". */
+    private ConfigStore.GradientDef gradientFor(Rank rank) {
+        ConfigStore.GradientDef d = store.gradient(rank.kingdom.id + "." + rank.role.id);
+        return d != null ? d : store.gradient(rank.role.id);
+    }
+
+    private boolean gradientsOn() {
+        return config().gradients.enabled;
+    }
+
+    /** The player's prefix, or null if they have none. */
+    public Prefix prefixOf(ServerPlayerEntity player) {
+        TabConfig.Players p = config().players;
         Rank rank = useTabRank() ? rankOf(player.getUniqueID()) : null;
-        ServerUtilitiesBridge.SuRank su = rank == null ? shownSuRank(player.getUniqueID()) : null;
-        IFormattableTextComponent root = new StringTextComponent("");
         if (rank != null) {
             int kingdomColor = TabLogic.colorOr(rank.kingdom.color, 0xFFFFFF);
             int prefixColor = TabLogic.colorOr(rank.role.color, kingdomColor);
             String prefix = TabLogic.prefix(p.prefixFormat, rank.kingdom.tag, rank.kingdom.name, rank.role.name);
-            if (!prefix.isEmpty()) {
-                root.appendSibling(text(prefix, TabLogic.formatColor(prefixColor), prefixColor, rank.role.bold));
-                root.appendSibling(new StringTextComponent(" "));
+            if (prefix.isEmpty()) {
+                return null;
             }
             int nameColor;
             if ("KINGDOM".equalsIgnoreCase(p.nameColor)) {
@@ -373,21 +528,104 @@ public final class TabService {
             } else {
                 nameColor = TabLogic.colorOr(p.nameColor, 0xFFFFFF);
             }
-            root.appendSibling(text(name, TabLogic.formatColor(nameColor), nameColor, p.nameBold));
-        } else if (su != null) {
-            root.appendSibling(legacy(su.prefix));
-            root.appendSibling(new StringTextComponent(" "));
-            int nameColor = 0xFFFFFF;
-            if ("PREFIX".equalsIgnoreCase(p.serverUtilitiesNameColor)) {
-                for (TabLogic.Segment seg : TabLogic.parseLegacy(su.prefix)) {
-                    if (seg.color != null) {
-                        nameColor = seg.color;
+            String legacy = TabLogic.legacyHex(prefixColor) + (rank.role.bold ? "&l" : "") + prefix;
+            ConfigStore.GradientDef def = gradientsOn() ? gradientFor(rank) : null;
+            if (def != null && stops(def) != null) {
+                return new Prefix(gradientText(legacy, def), nameColor,
+                        GradientLogic.animated(GradientLogic.parseAnimation(def.animation)), null, def);
+            }
+            return new Prefix(render(chars(legacy), null, null), nameColor, false, null, null);
+        }
+        ServerUtilitiesBridge.SuRank su = shownSuRank(player.getUniqueID());
+        if (su == null) {
+            return null;
+        }
+        ConfigStore.GradientDef def = gradientsOn() ? store.gradient(su.rankName) : null;
+        List<Integer> stops = stops(def);
+        int nameColor = 0xFFFFFF;
+        if ("PREFIX".equalsIgnoreCase(p.serverUtilitiesNameColor)) {
+            if (stops != null) {
+                nameColor = stops.get(stops.size() - 1);
+            } else {
+                for (StyledChar c : chars(su.prefix)) {
+                    if (c.color != null) {
+                        nameColor = c.color;
                     }
                 }
-            } else {
-                nameColor = TabLogic.colorOr(p.serverUtilitiesNameColor, 0xFFFFFF);
             }
-            root.appendSibling(text(name, TabLogic.formatColor(nameColor), nameColor, p.nameBold));
+        } else {
+            nameColor = TabLogic.colorOr(p.serverUtilitiesNameColor, 0xFFFFFF);
+        }
+        if (stops != null) {
+            return new Prefix(gradientText(su.prefix, def), nameColor,
+                    GradientLogic.animated(GradientLogic.parseAnimation(def.animation)), su.prefix, def);
+        }
+        return new Prefix(render(chars(su.prefix), null, null), nameColor, false, su.prefix, null);
+    }
+
+    /**
+     * The prefix text (with &amp; codes) that a gradient key applies to, for previews: a Server
+     * Utilities rank name, a /tabrank "kingdom.role" or a role id. Null if the key is unknown.
+     */
+    public String sourceText(String key) {
+        String su = ServerUtilitiesBridge.prefixOfRank(key);
+        if (su != null) {
+            return su;
+        }
+        TabConfig cfg = config();
+        String kingdomId = null;
+        String roleId = key;
+        int dot = key.indexOf('.');
+        if (dot > 0) {
+            kingdomId = key.substring(0, dot);
+            roleId = key.substring(dot + 1);
+        }
+        TabConfig.Role role = cfg.role(roleId);
+        TabConfig.Kingdom kingdom = kingdomId == null ? (cfg.kingdoms.isEmpty() ? null : cfg.kingdoms.get(0)) : cfg.kingdom(kingdomId);
+        if (role == null || kingdom == null) {
+            return null;
+        }
+        return (role.bold ? "&l" : "") + TabLogic.prefix(cfg.players.prefixFormat, kingdom.tag, kingdom.name, role.name);
+    }
+
+    /** Valid gradient keys: Server Utilities ranks, then "kingdom.role" and role ids. */
+    public List<String> knownKeys() {
+        List<String> keys = new ArrayList<>(ServerUtilitiesBridge.rankNames());
+        for (TabConfig.Kingdom k : config().kingdoms) {
+            for (TabConfig.Role r : config().roles) {
+                keys.add(k.id + "." + r.id);
+            }
+        }
+        for (TabConfig.Role r : config().roles) {
+            keys.add(r.id);
+        }
+        return keys;
+    }
+
+    /** Tab-list name, or null to leave the vanilla name (display disabled). */
+    public ITextComponent displayName(ServerPlayerEntity player) {
+        ITextComponent cached = names.get(player.getUniqueID());
+        return cached != null ? cached : buildName(player);
+    }
+
+    private ITextComponent buildName(ServerPlayerEntity player) {
+        TabConfig cfg = config();
+        if (!cfg.enabled) {
+            return null;
+        }
+        TabConfig.Players p = cfg.players;
+        String name = player.getGameProfile().getName();
+        Prefix prefix = prefixOf(player);
+        IFormattableTextComponent root = new StringTextComponent("");
+        if (prefix != null) {
+            if (!cfg.gradients.inTabList && prefix.gradient != null) {
+                // gradients switched off for the tab list: show the prefix's own colours
+                root.appendSibling(render(chars(prefix.suPrefix != null ? prefix.suPrefix : prefix.text.getString()), null, null));
+            } else {
+                root.appendSibling(prefix.text);
+            }
+            root.appendSibling(new StringTextComponent(" "));
+            root.appendSibling(text(name, TabLogic.formatColor(prefix.nameColor), prefix.nameColor, p.nameBold));
         } else {
             root.appendSibling(text(name, p.unrankedNameColor, 0xFFFFFF, p.nameBold));
         }
@@ -396,6 +634,43 @@ public final class TabService {
             root.appendSibling(text(" " + ms + "ms", TabLogic.formatColor(TabLogic.pingColor(ms)), 0xAAAAAA, false));
         }
         return root;
+    }
+
+    /**
+     * Chat: Server Utilities writes the chat line (its prefix converted to section codes). If the
+     * player's Server Utilities rank has a gradient, the prefix inside that line is replaced by
+     * the gradient version; everything else of the line is kept as Server Utilities made it
+     * (links stay clickable). Returns null to leave the line unchanged.
+     */
+    public ITextComponent chatLine(ServerPlayerEntity player, ITextComponent original) {
+        if (!config().enabled || !gradientsOn() || !config().gradients.inChat || original == null) {
+            return null;
+        }
+        ServerUtilitiesBridge.SuRank su = ServerUtilitiesBridge.rankOf(player.getUniqueID());
+        if (su == null || su.prefix.isEmpty()) {
+            return null;
+        }
+        ConfigStore.GradientDef def = store.gradient(su.rankName);
+        if (stops(def) == null) {
+            return null;
+        }
+        String formatted = ServerUtilitiesBridge.formatString(su.prefix);
+        String line = original.getString();
+        int idx = formatted == null || formatted.isEmpty() ? -1 : line.indexOf(formatted);
+        if (idx < 0) {
+            return null; // the line is not Server Utilities' format (another chat mod): leave it alone
+        }
+        IFormattableTextComponent out = new StringTextComponent("");
+        if (idx > 0) {
+            out.appendSibling(net.minecraftforge.common.ForgeHooks.newChatWithLinks(line.substring(0, idx)));
+        }
+        out.appendSibling(gradientText(su.prefix, def));
+        String rest = line.substring(idx + formatted.length());
+        if (!rest.isEmpty()) {
+            // Reset first: the gradient's last style must not leak into the name and message.
+            out.appendSibling(net.minecraftforge.common.ForgeHooks.newChatWithLinks("\u00a7r" + rest));
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------ sorting teams

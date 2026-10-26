@@ -1,5 +1,6 @@
 package net.grandtab;
 
+import net.grandtab.logic.GradientLogic;
 import net.grandtab.logic.TabLogic;
 
 /** Dependency-free checks of TabLogic. Exits with status 1 on the first failure. */
@@ -66,6 +67,42 @@ public final class TabLogicSelfTest {
         check(TabLogic.weightTeam(100).compareTo(TabLogic.weightTeam(10)) < 0, "higher weight sorts first");
         check(TabLogic.isSortTeam(TabLogic.weightTeam(-100000)) && TabLogic.isSortTeam(TabLogic.weightTeam(100000))
                 && !TabLogic.weightTeam(-100000).equals(TabLogic.UNRANKED_TEAM), "weights clamp into our range");
+
+        // Server Utilities &g rainbow (cycle 4c6e2ab319d5, one colour per character, spaces included)
+        java.util.List<TabLogic.Segment> g = TabLogic.parseLegacy("&g[KING]");
+        eq(6, g.size(), "&g: one segment per character");
+        eq(0xAA0000, g.get(0).color, "&g first colour is 4 (dark red)");
+        eq(0xFF5555, g.get(1).color, "&g second colour is c (red)");
+        eq("[KING]", TabLogic.stripLegacy("&g[KING]"), "&g code not shown literally");
+        eq("[KING]", TabLogic.stripLegacy("&l&g[KING]"), "&l&g");
+        java.util.List<TabLogic.Segment> h = TabLogic.parseLegacy("&hAB", "6e");
+        check(h.get(0).color == 0xFFAA00 && h.get(1).color == 0xFFFF55, "&h uses the month colours");
+        java.util.List<TabLogic.Segment> gc = TabLogic.parseLegacy("&gAB&fC");
+        check(gc.get(2).color == 0xFFFFFF && "C".equals(gc.get(2).text), "&g ends at the next code");
+
+        // Gradients
+        java.util.List<Integer> kingStops = java.util.Arrays.asList(0xFFAA00, 0xFFFF55, 0xFFFFFF);
+        int[] kg = GradientLogic.colors(kingStops, GradientLogic.Animation.STATIC, 6, 0.0);
+        check(kg[0] == 0xFFAA00 && kg[5] == 0xFFFFFF, "static gradient spans first to last stop");
+        int[] mid = GradientLogic.gradient(kingStops, 3);
+        eq(0xFFFF55, mid[1], "middle stop hit exactly");
+        int[] w1 = GradientLogic.colors(kingStops, GradientLogic.Animation.WAVE, 6, 0.0);
+        int[] w2 = GradientLogic.colors(kingStops, GradientLogic.Animation.WAVE, 6, 0.5);
+        check(!java.util.Arrays.equals(w1, w2), "wave moves with the phase");
+        int[] p1 = GradientLogic.colors(kingStops, GradientLogic.Animation.PULSE, 6, 0.25);
+        int[] p2 = GradientLogic.colors(kingStops, GradientLogic.Animation.PULSE, 6, 0.75);
+        check(!java.util.Arrays.equals(p1, p2), "pulse changes brightness");
+        int[] r1 = GradientLogic.colors(kingStops, GradientLogic.Animation.RAINBOW, 6, 0.1);
+        check(r1.length == 6 && r1[0] != r1[3], "rainbow spreads hues");
+        int[] sh = GradientLogic.colors(java.util.Arrays.asList(0x000000, 0x000000), GradientLogic.Animation.SHINE, 10, 0.5);
+        check(sh[5] != 0 && sh[0] == 0, "shine highlights the middle at phase 0.5 only");
+        check(GradientLogic.phase(10, 10) > GradientLogic.phase(10, 1), "higher speed advances further");
+        check(GradientLogic.phase(80, 1) < 1e-9, "speed 1 repeats after 80 frames");
+        eq(0xFFAA00, GradientLogic.parseHex("FFAA00"), "hex without #");
+        eq(GradientLogic.Animation.WAVE, GradientLogic.parseAnimation("Wave"), "animation names are case-insensitive");
+        check(GradientLogic.parseAnimation("spin") == null, "unknown animation refused");
+        check(!GradientLogic.animated(GradientLogic.Animation.STATIC) && GradientLogic.animated(GradientLogic.Animation.SHINE), "static is not animated");
+        eq("&#FFAA00", TabLogic.legacyHex(0xFFAA00), "legacy hex code");
 
         System.out.println("TabLogicSelfTest: all " + checks + " checks passed");
     }

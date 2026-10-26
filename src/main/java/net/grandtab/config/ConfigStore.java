@@ -28,10 +28,13 @@ import java.util.UUID;
 public final class ConfigStore {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static final Type ASSIGNMENTS = new TypeToken<LinkedHashMap<String, Assignment>>() { }.getType();
+    private static final Type GRADIENTS = new TypeToken<LinkedHashMap<String, GradientDef>>() { }.getType();
 
     private final Path dir;
     private TabConfig config = new TabConfig();
     private final Map<UUID, Assignment> assignments = new LinkedHashMap<>();
+    /** Rank name (lower case) to gradient. */
+    private final Map<String, GradientDef> gradients = new LinkedHashMap<>();
     private String lastError;
 
     public static final class Assignment {
@@ -47,6 +50,68 @@ public final class ConfigStore {
             this.name = name;
             this.kingdom = kingdom;
             this.role = role;
+        }
+    }
+
+    /** A gradient for one rank, as stored in gradients.json. */
+    public static final class GradientDef {
+        /** At least two colours, #RRGGBB. */
+        public java.util.List<String> colors = new java.util.ArrayList<>();
+        /** STATIC, WAVE, PULSE, RAINBOW or SHINE. */
+        public String animation = "STATIC";
+        /** 1 (slow) to 10 (fast). */
+        public int speed = 3;
+        /** null = keep the bold of the original prefix; true/false = force. */
+        public Boolean bold;
+    }
+
+    public Map<String, GradientDef> gradients() {
+        return gradients;
+    }
+
+    public GradientDef gradient(String rank) {
+        return rank == null ? null : gradients.get(rank.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    public Path gradientsFile() {
+        return dir.resolve("gradients.json");
+    }
+
+    public boolean saveGradients() {
+        return write(gradientsFile(), gradients);
+    }
+
+    /** Reloads only gradients.json. Returns null on success, otherwise the problem. */
+    public String loadGradients() {
+        Path gfile = gradientsFile();
+        if (!Files.exists(gfile)) {
+            gradients.clear();
+            saveGradients();
+            return null;
+        }
+        try (Reader reader = Files.newBufferedReader(gfile, StandardCharsets.UTF_8)) {
+            Map<String, GradientDef> raw = GSON.fromJson(reader, GRADIENTS);
+            Map<String, GradientDef> fresh = new LinkedHashMap<>();
+            if (raw != null) {
+                for (Map.Entry<String, GradientDef> e : raw.entrySet()) {
+                    GradientDef d = e.getValue();
+                    if (d == null || d.colors == null || d.colors.size() < 2) {
+                        GrandTab.LOG.warn("Grand Tab: gradient '{}' needs at least two colours; ignored", e.getKey());
+                        continue;
+                    }
+                    if (d.animation == null) {
+                        d.animation = "STATIC";
+                    }
+                    fresh.put(e.getKey().toLowerCase(java.util.Locale.ROOT), d);
+                }
+            }
+            gradients.clear();
+            gradients.putAll(fresh);
+            return null;
+        } catch (IOException | JsonParseException e) {
+            String problem = "gradients.json is not valid JSON (" + e.getMessage() + "); keeping the previous gradients";
+            GrandTab.LOG.error("Grand Tab: {}", problem);
+            return problem;
         }
     }
 
@@ -128,6 +193,11 @@ public final class ConfigStore {
             }
         } else {
             ok &= saveAssignments();
+        }
+        String gproblem = loadGradients();
+        if (gproblem != null) {
+            ok = false;
+            lastError = gproblem;
         }
         return ok;
     }

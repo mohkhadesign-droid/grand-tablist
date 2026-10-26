@@ -17,6 +17,7 @@ public final class TabConfig {
     /** Permission level for /tabrank (2 = operators). */
     public int commandPermissionLevel = 2;
 
+    public Gradients gradients = new Gradients();
     public Header header = new Header();
     public Footer footer = new Footer();
     public Players players = new Players();
@@ -30,6 +31,25 @@ public final class TabConfig {
             new Role("warden", "WARDEN", 3, true, ""),
             new Role("sage", "SAGE", 4, false, ""),
             new Role("knight", "KNIGHT", 5, false, "")));
+
+    /** Where rank gradients (gradients.json) are shown and how often animations advance. */
+    public static final class Gradients {
+        public boolean enabled = true;
+        /** Ticks between animation frames (20 = 1 s). Lower is smoother but sends more updates. */
+        public int frameTicks = 4;
+        public boolean inTabList = true;
+        public boolean inChat = true;
+        public Nametags nametags = new Nametags();
+    }
+
+    /** Rank prefix floating over each player's head (marker entities, no scoreboard teams). */
+    public static final class Nametags {
+        public boolean enabled = true;
+        /** ABOVE (over the player's name) or BELOW (between the name and the head). */
+        public String position = "ABOVE";
+        /** Also show prefixes that have no gradient (plain Server Utilities / tabrank colours). */
+        public boolean showAllPrefixes = true;
+    }
 
     public static final class Header {
         /** AUTO: logo image for players who loaded the server resource pack, text title for others. PACK, TEXT or NONE. */
@@ -145,6 +165,16 @@ public final class TabConfig {
         if (header == null) {
             header = new Header();
         }
+        if (gradients == null) {
+            gradients = new Gradients();
+        }
+        if (gradients.nametags == null) {
+            gradients.nametags = new Nametags();
+        }
+        if (gradients.nametags.position == null) {
+            gradients.nametags.position = "ABOVE";
+        }
+        gradients.frameTicks = Math.max(2, Math.min(100, gradients.frameTicks));
         if (footer == null) {
             footer = new Footer();
         }

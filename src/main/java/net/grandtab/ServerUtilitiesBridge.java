@@ -20,7 +20,16 @@ import java.util.UUID;
  *   <li>{@code IPlayerData.getPrefix()}: the same prefix Server Utilities puts in chat, with
  *   &amp; colour codes; {@code IPlayerData.getDomRank()} returning IRank, and
  *   {@code IRank.getName()} / {@code getWeight()} for sorting</li>
+ *   <li>{@code dev.elrol.serverutilities.init.Ranks.rankMap} (static Map of rank name to Rank)
+ *   for the list of rank names</li>
+ *   <li>{@code Main.textUtils.formatString(String)}: Server Utilities' own conversion of
+ *   &amp; codes, used to find its prefix inside its chat lines</li>
+ *   <li>{@code dev.elrol.serverutilities.config.FeatureConfig.jan_colors} … {@code dec_colors}:
+ *   the month colours of its &amp;h code</li>
  * </ul>
+ * Server Utilities 2.8.0 has no public API for this (its IElrolAPI only exposes commands, text
+ * utilities and folders), so these public members of its implementation are used, and every
+ * call is guarded: if a later version changes them, the integration switches itself off.
  */
 public final class ServerUtilitiesBridge {
     private static boolean initialised;
@@ -66,6 +75,86 @@ public final class ServerUtilitiesBridge {
             status = "Server Utilities found, but its rank API is different from version 2.8.0 (" + e + ")";
             GrandTab.LOG.warn("Grand Tab: {}", status);
         }
+    }
+
+    /** Names of all Server Utilities ranks (internal names such as testking), or empty. */
+    public static java.util.List<String> rankNames() {
+        java.util.List<String> names = new java.util.ArrayList<>();
+        if (!available()) {
+            return names;
+        }
+        try {
+            Object map = Class.forName("dev.elrol.serverutilities.init.Ranks").getField("rankMap").get(null);
+            if (map instanceof java.util.Map) {
+                for (Object key : ((java.util.Map<?, ?>) map).keySet()) {
+                    names.add(String.valueOf(key));
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            GrandTab.LOG.debug("Grand Tab: cannot list Server Utilities ranks", e);
+        }
+        java.util.Collections.sort(names);
+        return names;
+    }
+
+    /** The raw prefix (with &amp; codes) of a Server Utilities rank, or null if unknown. */
+    public static String prefixOfRank(String rankName) {
+        if (!available()) {
+            return null;
+        }
+        try {
+            Object map = Class.forName("dev.elrol.serverutilities.init.Ranks").getField("rankMap").get(null);
+            if (map instanceof java.util.Map) {
+                for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) map).entrySet()) {
+                    if (String.valueOf(e.getKey()).equalsIgnoreCase(rankName) && e.getValue() != null) {
+                        Object prefix = e.getValue().getClass().getMethod("getPrefix").invoke(e.getValue());
+                        return prefix == null ? "" : prefix.toString();
+                    }
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            GrandTab.LOG.debug("Grand Tab: cannot read Server Utilities rank {}", rankName, e);
+        }
+        return null;
+    }
+
+    /** Server Utilities' own formatting of a string (&amp; codes to section codes), or null. */
+    public static String formatString(String raw) {
+        if (!available()) {
+            return null;
+        }
+        try {
+            Object utils = Class.forName("dev.elrol.serverutilities.Main").getField("textUtils").get(null);
+            if (utils == null) {
+                return null;
+            }
+            Object out = utils.getClass().getMethod("formatString", String.class).invoke(utils, raw);
+            return out == null ? null : out.toString();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            GrandTab.LOG.debug("Grand Tab: cannot call Server Utilities formatString", e);
+            return null;
+        }
+    }
+
+    private static final String[] MONTHS = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+
+    /** This month's colour codes of Server Utilities' &amp;h code, or "" if unavailable. */
+    public static String holidayCodes() {
+        if (!available()) {
+            return "";
+        }
+        try {
+            int month = java.util.Calendar.getInstance().get(java.util.Calendar.MONTH);
+            Object value = Class.forName("dev.elrol.serverutilities.config.FeatureConfig")
+                    .getField(MONTHS[month] + "_colors").get(null);
+            if (value instanceof net.minecraftforge.common.ForgeConfigSpec.ConfigValue) {
+                Object codes = ((net.minecraftforge.common.ForgeConfigSpec.ConfigValue<?>) value).get();
+                return codes == null ? "" : codes.toString();
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            GrandTab.LOG.debug("Grand Tab: cannot read Server Utilities holiday colours", e);
+        }
+        return "";
     }
 
     public static String status() {
