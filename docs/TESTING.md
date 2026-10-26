@@ -4,9 +4,10 @@
 
 - **Executed:**
   - The project compiles and reobfuscates on GitHub Actions against Forge 1.16.5-36.2.39.
-  - `TabLogicSelfTest` passes: all 33 checks (colours, prefix format, sorting-team order and
-    names, Server Utilities weight sorting, legacy colour-code parsing, ping colours, player
-    count, ids).
+  - `TabLogicSelfTest` passes: all 53 checks (colours, prefix format, sorting-team order and
+    names, Server Utilities weight sorting, legacy colour-code parsing including Server
+    Utilities' &g and &h, gradient maths and every animation, speed, ping colours, player count,
+    ids).
   - The Server Utilities members used were read from `Server_Utils-1.16.5-2.8.0.jar` with javap.
   - Every Minecraft/Forge member the mod uses was checked against the mapped Forge jar (javap).
 - **Not executed:** every in-game scenario below. They need a running server with clients.
@@ -37,3 +38,24 @@
 | T20 | Change the player's SU rank with SU's `/rank` command | Tab updates within 2 s. |
 | T21 | `/tabrank source tabrank` / `serverutilities` | SU prefixes ignored / only SU prefixes used. |
 | T22 | Remove Server Utilities from the server | Mod still loads; `/tabrank info` says it is not installed. |
+
+## Rank gradient scenarios (all NOT RUN)
+
+| # | Scenario | Expected |
+|---|---|---|
+| G1 | Player with SU rank `testking` (prefix using `&g`) before any gradient | Tab and head label show [KING] in the SU rainbow; no literal `&g`. |
+| G2 | `/rankgradient set testking #FFAA00 #FFFF55 #FFFFFF` | Within 1 s: Tab and head label show [KING] gold → yellow → white; next chat message too. |
+| G3 | `/rankgradient animate testking wave`, then `speed testking 8`, then `static testking` | Colours slide in Tab and over the head, faster after speed 8, stop after static. Chat lines each show one frame. |
+| G4 | `pulse`, `rainbow`, `shine` | Breathing brightness / cycling hues / white sweep. |
+| G5 | `/rankgradient set testking #FFAA00` (one colour) / `set testking #GGGGGG #FFFFFF` | Refused with a clear message. |
+| G6 | `/rankgradient set nosuchrank #FF0000 #00FF00` | Refused; lists the SU rank names. |
+| G7 | `/rankgradient gui` → click testking → click palette colours, ×, speed [+], wave | Each click saves and redraws the editor with the new preview. |
+| G8 | Restart the server | Gradients still there (`gradients.json`). |
+| G9 | Edit `gradients.json` by hand, `/rankgradient reload`; then break it and reload | Changes applied; broken file reported and previous gradients kept. |
+| G10 | Chat with a link from a gradient rank | Prefix in gradient; name and message as SU formats them; link still clickable. |
+| G11 | `/team` a player, or let the other mod clear teams | Tab prefix and head label unaffected. |
+| G12 | Player with head label sneaks / swims / dies / changes dimension / logs out | Label hidden / gone under water and back after / rebuilt after respawn / rebuilt in the new dimension / removed. No stray floating labels. |
+| G13 | Hit the player in the head area, shoot arrows, right-click them | Never blocked by the label. |
+| G14 | `nametags.position` BELOW, `/tabrank reload` | Label between name and head. |
+| G15 | `frameTicks` 10 and 15 players online with animated ranks | No noticeable lag (check `/forge tps`). |
+| G16 | `/rankgradient set K1.monarch #FFD700 #FFFFFF` for a `/tabrank` monarch | That prefix gets the gradient. |

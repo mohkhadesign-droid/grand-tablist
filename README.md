@@ -6,11 +6,12 @@ A server-side Forge **1.16.5** mod that turns the Tab player list into a styled 
 - a live **ONLINE PLAYERS** count;
 - kingdom rank prefixes such as **[K1 MONARCH] Ali**;
 - live ping;
+- animated gradient rank prefixes in Tab, chat and over players' heads;
 - Discord and website lines at the bottom.
 
 Made for The Grand Expedition (Crazy Craft Updated). It's separate from Flan Warfare & Conquest.
 
-> **Status:** compiles on GitHub Actions against Forge 1.16.5-36.2.39, and its 33 automated
+> **Status:** compiles on GitHub Actions against Forge 1.16.5-36.2.39, and its 53 automated
 > logic checks pass. It has **not** been tested on a running server yet; see
 > [docs/TESTING.md](docs/TESTING.md).
 
@@ -134,6 +135,131 @@ works for offline players the server has seen before.
 | `/tabrank version` | Installed version and build |
 
 ---
+
+## 4b. Rank gradients and animations
+
+Gradients recolour rank prefixes such as `[KING]`: gold → yellow → white, optionally
+animated. **Players install nothing.** Minecraft 1.16 can colour every character separately,
+and the server re-sends the text for each animation frame.
+
+### Which rank a gradient belongs to
+
+A gradient is stored under a **rank key**:
+
+- **A Server Utilities rank name**, e.g. `testking` or `k3warden`. This is the internal name,
+  not the displayed prefix. A player uses the gradient of their dominant Server Utilities rank,
+  the one whose prefix Server Utilities shows in chat.
+- **For `/tabrank` ranks:** `K1.monarch` (one kingdom's role) or `monarch` (that role in every
+  kingdom).
+
+Server Utilities ranks and permissions are never modified. Its rank names and prefixes are read
+by reflection, because Server Utilities 2.8.0 has no public API for them; see §6.
+
+### Commands (operators)
+
+| Command | What it does |
+|---|---|
+| `/rankgradient set testking #FFAA00 #FFFF55 #FFFFFF` | Gradient with any number of colour stops (minimum 2). `#` is optional; names like `gold` work too. |
+| `/rankgradient animate testking wave` | `static`, `wave` (colours slide along), `pulse` (brightness breathes), `rainbow` (cycling hues, ignores the stops), `shine` (a white highlight sweeps across) |
+| `/rankgradient speed testking 3` | 1 (slow) to 10 (fast) |
+| `/rankgradient static testking` | Stop the animation and keep the gradient |
+| `/rankgradient addcolor testking #FF4500` | Add a colour at the end |
+| `/rankgradient setcolor testking 2 #FFD700` | Change colour number 2 |
+| `/rankgradient removecolor testking 2` | Remove colour number 2 (at least two remain) |
+| `/rankgradient bold testking true\|false\|default` | Force bold on or off, or keep the prefix's own `&l` |
+| `/rankgradient remove testking` | Delete the gradient; the normal prefix colours return |
+| `/rankgradient preview testking` | Show the prefix with its gradient in chat |
+| `/rankgradient list` | All gradients with previews; click one to edit it |
+| `/rankgradient reload` | Re-read `config/grandtab/gradients.json` after editing it by hand |
+| `/rankgradient gui [rank]` | The clickable editor (below) |
+
+Every change is saved at once to `config/grandtab/gradients.json` and appears within a second.
+`gradients.json` looks like this:
+
+```json
+{
+  "testking": { "colors": ["#FFAA00", "#FFFF55", "#FFFFFF"], "animation": "WAVE", "speed": 3, "bold": true }
+}
+```
+
+### The editor: `/rankgradient gui`
+
+The editor opens **in chat**, server-only, with clickable parts:
+
+- **Rank list:** the Server Utilities ranks, each with its current look; click one.
+- **Preview:** the prefix as it will look, followed by a sample name.
+- **Colours:** each colour shown as a coloured block.
+  - Click a block to change it: the command is put in your chat box with the hex code, so you
+    edit the hex and press Enter.
+  - Click **×** to remove a colour.
+  - Click **[+ hex]** to type any `#RRGGBB`.
+- **Add:** a palette of 24 colours. Click one to append it.
+- **Animation:** static, wave, pulse, rainbow, shine, with the current one highlighted.
+- **Speed:** `[-]` and `[+]`.
+- **Bold:** cycles default, on and off.
+- **Remove gradient:** puts the command in your chat box; press Enter to confirm.
+
+Changes save instantly and the editor redraws with the new preview.
+
+**A real graphical window needs a client mod.** A colour wheel, sliders or a live animated
+preview can't be drawn by a server; only the client can draw GUI screens. This could be a
+separate small client mod that **only admins install**: it would send its changes to the server,
+and ordinary players still need nothing. It isn't part of this build. Ask if you want it.
+
+### Where gradients appear
+
+| Place | Server-only? | How | Animated? |
+|---|---|---|---|
+| **Tab list** | Yes | The tab name (Forge `TabListNameFormat`, no scoreboard teams) | Yes. Only players whose rank is animated are re-sent each frame. |
+| **Chat** | Yes | Server Utilities builds the chat line as usual. This mod runs after it (lowest priority) and replaces only the prefix inside that line with the gradient version. The name, message and clickable links stay exactly as Server Utilities made them. | No. A sent chat line can't change, so each message shows the animation frame of the moment it was sent. |
+| **Over the head** | Yes | An invisible label entity riding the player shows the prefix on its own line, above the name (`ABOVE`, default) or between the name and the head (`BELOW`). The vanilla nametag can only be decorated through scoreboard teams, which another mod on your server keeps clearing, so they aren't used. | Yes |
+
+**What the head labels do:**
+
+- **They never get in the way.** They have no hitbox, so they never block hits, arrows or clicks.
+- **They hide when they should:** while the player sneaks, is invisible or spectates; while
+  dead; and under water, because vanilla drops riders there.
+- **They clean up after themselves.** They're removed on logout, death, dimension change and
+  server stop. Leftovers after a crash are deleted automatically.
+
+**`&g` and `&h` no longer appear literally.** These are Server Utilities' own codes:
+
+- `&g` is its rainbow: every character cycles through `4 c 6 e 2 a b 3 1 9 d 5`.
+- `&h` uses this month's colours from its config.
+
+The Tab list and head labels now draw them the same way Server Utilities does in chat. A
+gradient, when set, replaces them.
+
+### Settings (`config.json`, section `gradients`)
+
+```json
+"gradients": {
+  "enabled": true,
+  "frameTicks": 4,
+  "inTabList": true,
+  "inChat": true,
+  "nametags": { "enabled": true, "position": "ABOVE", "showAllPrefixes": true }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Master switch for gradients and head labels |
+| `frameTicks` | Ticks between animation frames. 4 = 5 frames per second. Raise it (e.g. 10) to send fewer updates. |
+| `inTabList` / `inChat` | Where gradients are applied |
+| `nametags.enabled` | Rank labels over heads |
+| `nametags.position` | `ABOVE` or `BELOW` |
+| `nametags.showAllPrefixes` | `true`: every ranked player gets a head label. `false`: only ranks with a gradient. |
+
+**Network cost:**
+
+- **Static gradients** are sent only when something changes.
+- **Animated ranks:**
+  - Tab list: one small "display name" update per animated player per frame.
+  - Head labels: one entity-name update per animated player per frame, sent only to players
+    near them.
+- With 15 players at the default 5 frames per second, that's a few kilobytes per second in
+  total.
 
 ## 5. Configuration (`config/grandtab/config.json`)
 
@@ -279,6 +405,19 @@ name changes don't lose ranks:
   - **Not the team remover.** Server Utilities 2.8.0 contains no scoreboard-team code and does
     not set tab names, so it is not what kept removing players from your `/team` teams. That is
     another mod. This mod's prefixes don't depend on teams either way.
+  - **Gradient integration (verified in the 2.8.0 jar):**
+    - Rank names come from `Ranks.rankMap`.
+    - A player's rank comes from `PlayerDatabase.get(uuid).getDomRank()`.
+    - Its chat formatting comes from `Main.textUtils.formatString`, used to find the prefix
+      inside its chat line.
+    - The `&h` colours come from `FeatureConfig.<month>_colors`.
+
+    Server Utilities 2.8.0 has no public API for any of this: its `IElrolAPI` only offers
+    commands, text helpers and folders. So these public members of its implementation are used,
+    every call is guarded, and if a future version changes them the integration switches itself
+    off instead of crashing.
+  - **Every `&g` chat message adds one log line.** Server Utilities logs a "Color List" line each
+    time its `&g` rainbow is formatted; that's its own logging.
   - **Flan Warfare's rank chat clashes with it.** Server Utilities also rewrites chat lines, so
     disable one of the two chat formats (Flan Warfare: `rank_chat.enabled = false`).
 - **Flan, FTB Teams, FTB Chunks:** untouched. The mod reads nothing from them and changes no
@@ -297,6 +436,11 @@ name changes don't lose ranks:
 
 ## 7. Known limitations
 
+- **Head labels can collide with Flan Warfare's.** If Flan Warfare's kingdom-rank labels
+  (`rank_nametags` `ABOVE`/`BELOW`) are also on, both would float at the same height. Use one
+  of them.
+- **Chat gradients need Server Utilities to write the chat line.** They apply to Server
+  Utilities ranks. If another chat mod formats chat instead, the line is left unchanged.
 - **Not tested in game yet.** Follow `docs/TESTING.md` on a copy of the server first.
 - **Background panel:** the Tab background can't be changed without a client mod (Option B).
 - **Resource pack is optional for players:** 1.16.5 cannot force it, so decliners see the text
