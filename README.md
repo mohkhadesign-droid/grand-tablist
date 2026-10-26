@@ -231,6 +231,8 @@ and ordinary players still need nothing. It isn't part of this build. Ask if you
 - **They hide when they should:**
   - hidden while the player sneaks (like vanilla nametags);
   - removed while the player is invisible, spectating or dead.
+- **The label includes the player's name.** Minecraft doesn't draw the nametag of a player who
+  has something riding them, so the label shows the name itself, in the same place and size.
 - **You don't see your own label,** just like your own vanilla nametag.
 
 **Why 1.0.0-b1 to b3 could leave a tag floating in the sky:** those versions used a real
@@ -261,7 +263,7 @@ gradient, when set, replaces them.
   "frameTicks": 4,
   "inTabList": true,
   "inChat": true,
-  "nametags": { "enabled": true, "position": "ABOVE", "showAllPrefixes": true }
+  "nametags": { "enabled": true, "position": "INLINE", "showAllPrefixes": true }
 }
 ```
 
@@ -271,7 +273,7 @@ gradient, when set, replaces them.
 | `frameTicks` | Ticks between animation frames. 4 = 5 frames per second. Raise it (e.g. 10) to send fewer updates. |
 | `inTabList` / `inChat` | Where gradients are applied |
 | `nametags.enabled` | Rank labels over heads |
-| `nametags.position` | `ABOVE` or `BELOW` |
+| `nametags.position` | `INLINE` (default): "[K3 WARDEN] Name" on one line where the normal nametag is. `ABOVE`: name, with the prefix on a line above. `BELOW`: name, with the prefix on a line under it. Also `/tabrank nametag inline\|above\|below\|on\|off`. |
 | `nametags.showAllPrefixes` | `true`: every ranked player gets a head label. `false`: only ranks with a gradient. |
 
 **Network cost:**
@@ -459,8 +461,8 @@ name changes don't lose ranks:
 
 ## 7. Known limitations
 
-- **Head label heights are fixed.** BELOW is about 1.85 blocks and ABOVE about 2.6 blocks above
-  the feet; vanilla has no per-entity name offset.
+- **Head label heights are fixed.** The name line sits at the normal nametag height and a
+  second line about 0.4 blocks above it; vanilla has no per-entity name offset.
 - **Head labels can collide with Flan Warfare's.** If Flan Warfare's kingdom-rank labels
   (`rank_nametags` `ABOVE`/`BELOW`) are also on, both would float at the same height. Use one
   of them.
