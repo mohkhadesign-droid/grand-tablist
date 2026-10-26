@@ -10,6 +10,8 @@
     ids).
   - The Server Utilities members used were read from `Server_Utils-1.16.5-2.8.0.jar` with javap.
   - Every Minecraft/Forge member the mod uses was checked against the mapped Forge jar (javap).
+- **Executed for the b4 head-label fix:** compile only. The new label code uses only members
+  confirmed in the mapped Forge jar by compilation. The behaviour in game is untested.
 - **Not executed:** every in-game scenario below. They need a running server with clients.
 
 ## In-game scenarios (all NOT RUN)
@@ -54,8 +56,27 @@
 | G9 | Edit `gradients.json` by hand, `/rankgradient reload`; then break it and reload | Changes applied; broken file reported and previous gradients kept. |
 | G10 | Chat with a link from a gradient rank | Prefix in gradient; name and message as SU formats them; link still clickable. |
 | G11 | `/team` a player, or let the other mod clear teams | Tab prefix and head label unaffected. |
-| G12 | Player with head label sneaks / swims / dies / changes dimension / logs out | Label hidden / gone under water and back after / rebuilt after respawn / rebuilt in the new dimension / removed. No stray floating labels. |
+| G12 | Player with head label sneaks / swims / dies / changes dimension / logs out | Label hidden while sneaking / stays on the player while swimming / gone while dead, back after respawn / shown in the new dimension / removed. No stray floating labels. |
 | G13 | Hit the player in the head area, shoot arrows, right-click them | Never blocked by the label. |
 | G14 | `nametags.position` BELOW, `/tabrank reload` | Label between name and head. |
 | G15 | `frameTicks` 10 and 15 players online with animated ranks | No noticeable lag (check `/forge tps`). |
 | G16 | `/rankgradient set K1.monarch #FFD700 #FFFFFF` for a `/tabrank` monarch | That prefix gets the gradient. |
+
+## Head label fix (1.0.0-b4) scenarios (all NOT RUN)
+
+Two accounts: A watches, B has a rank prefix (e.g. `[K3 MONARCH]`).
+
+| # | Scenario | Expected |
+|---|---|---|
+| N1 | B walks, sprints, jumps, flies (creative/elytra), swims | A sees the label exactly over B at all times. |
+| N2 | B teleports far (`/tp`, Server Utilities `/home` or `/spawn`, ender pearl) | No label left at the old spot; label appears over B at the destination when A is there. |
+| N3 | B walks out of A's view distance and back | Label disappears with B and comes back with B. |
+| N4 | B dies (PvP near a flagpole) and respawns elsewhere | Label gone during death; back over B after respawn; nothing left at the death spot. |
+| N5 | B goes through a Nether portal and back | Label follows; nothing left at either portal. |
+| N6 | B logs out and in; A logs out and in | Label gone / back; A sees B's label again after rejoining. |
+| N7 | B sneaks / drinks invisibility / spectator mode | Label hidden / gone / gone; back afterwards. |
+| N8 | B gets in a boat or on a horse | Label stays over B. |
+| N9 | `nametags.position` BELOW/ABOVE, `/tabrank reload` | Label moves under/over B's name; no duplicate. |
+| N10 | Animated gradient on B's rank | Colours animate on the label; `/forge tps` unchanged. |
+| N11 | Start the server once with b3 to create labels, crash it (kill the process), start with b4 | No floating labels; log says leftover labels removed (if any were loaded). |
+| N12 | `/tabrank cleanup` with a normal armour stand and an armour stand of another mod nearby | Only GrandTab leftovers removed; other armour stands untouched. |

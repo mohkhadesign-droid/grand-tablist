@@ -130,6 +130,7 @@ works for offline players the server has seen before.
 | `/tabrank title <text>` / `subtitle <text>` | Header texts |
 | `/tabrank discord <text>` / `website <text>` | Footer texts |
 | `/tabrank source tabrank\|serverutilities\|both` | Where prefixes come from (see §6). `both` = `/tabrank` rank if set, otherwise the Server Utilities prefix. |
+| `/tabrank cleanup` | Remove floating labels left by versions before 1.0.0-b4 (only this mod's own) |
 | `/tabrank enable` / `disable` | Switch the custom tab list on or off (off = vanilla) |
 | `/tabrank reload` | Re-read both files after editing them by hand |
 | `/tabrank version` | Installed version and build |
@@ -212,15 +213,37 @@ and ordinary players still need nothing. It isn't part of this build. Ask if you
 |---|---|---|---|
 | **Tab list** | Yes | The tab name (Forge `TabListNameFormat`, no scoreboard teams) | Yes. Only players whose rank is animated are re-sent each frame. |
 | **Chat** | Yes | Server Utilities builds the chat line as usual. This mod runs after it (lowest priority) and replaces only the prefix inside that line with the gradient version. The name, message and clickable links stay exactly as Server Utilities made them. | No. A sent chat line can't change, so each message shows the animation frame of the moment it was sent. |
-| **Over the head** | Yes | An invisible label entity riding the player shows the prefix on its own line, above the name (`ABOVE`, default) or between the name and the head (`BELOW`). The vanilla nametag can only be decorated through scoreboard teams, which another mod on your server keeps clearing, so they aren't used. | Yes |
+| **Over the head** | Yes | An invisible label, which exists only on the players' screens, rides the player and shows the prefix on its own line: above the name (`ABOVE`, default) or between the name and the head (`BELOW`). The vanilla nametag can only be decorated through scoreboard teams, which another mod on your server keeps clearing, so they aren't used. | Yes |
 
-**What the head labels do:**
+**How the head labels work (since 1.0.0-b4):**
 
+- **Client-side only.** The label is never a real entity on the server. Each player's client
+  receives it exactly when it starts seeing the labelled player, and it is removed exactly when
+  it stops seeing them (out of range, death, respawn, dimension change, logout). Forge's
+  StartTracking and StopTracking events drive both.
+- **It follows the player.** The label rides the player on the client, so it moves smoothly
+  when walking, sprinting, jumping, flying, swimming and teleporting.
+- **It can't get stuck.** The riding link is re-sent every 2 seconds, so a label could never
+  stay behind for longer than that.
+- **Nothing to strand or save.** There is nothing on the server that could be left behind,
+  saved into a chunk, or seen by other mods as an extra rider on the player.
 - **They never get in the way.** They have no hitbox, so they never block hits, arrows or clicks.
-- **They hide when they should:** while the player sneaks, is invisible or spectates; while
-  dead; and under water, because vanilla drops riders there.
-- **They clean up after themselves.** They're removed on logout, death, dimension change and
-  server stop. Leftovers after a crash are deleted automatically.
+- **They hide when they should:**
+  - hidden while the player sneaks (like vanilla nametags);
+  - removed while the player is invisible, spectating or dead.
+- **You don't see your own label,** just like your own vanilla nametag.
+
+**Why 1.0.0-b1 to b3 could leave a tag floating in the sky:** those versions used a real
+armour stand riding the player. The server never sends position updates for riders. A client
+only keeps a rider in place through its "riding" link, and that link comes from separate
+packets of the player's and the stand's trackers. If a client lost the link, for example when
+the player was despawned on that client while the stand stayed loaded, the stand froze where the
+link broke. The server still saw a correct chain, so b3 never noticed.
+
+**Leftovers from b1-b3** are removed automatically at startup and whenever a chunk with one
+loads. `/tabrank cleanup` removes any in loaded chunks right away. Only armour stands and
+area-effect clouds carrying this mod's `grandtab_label` tag are touched, never other mods' or
+players' armour stands.
 
 **`&g` and `&h` no longer appear literally.** These are Server Utilities' own codes:
 
@@ -436,6 +459,8 @@ name changes don't lose ranks:
 
 ## 7. Known limitations
 
+- **Head label heights are fixed.** BELOW is about 1.85 blocks and ABOVE about 2.6 blocks above
+  the feet; vanilla has no per-entity name offset.
 - **Head labels can collide with Flan Warfare's.** If Flan Warfare's kingdom-rank labels
   (`rank_nametags` `ABOVE`/`BELOW`) are also on, both would float at the same height. Use one
   of them.
