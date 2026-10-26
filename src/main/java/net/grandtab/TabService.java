@@ -82,6 +82,7 @@ public final class TabService {
     public void start() {
         cleanupTeams(!config().players.sortByRank);
         nametags = new NametagDisplay(server, this);
+        nametags.removeLeftovers();
         dirty = true;
     }
 

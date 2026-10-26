@@ -1,5 +1,6 @@
 package net.grandtab;
 
+import io.netty.buffer.Unpooled;
 import net.grandtab.config.TabConfig;
 import net.minecraft.entity.AreaEffectCloudEntity;
 import net.minecraft.entity.Entity;
@@ -7,58 +8,97 @@ import net.minecraft.entity.EntityType;
 import net.minecraft.entity.item.ArmorStandEntity;
 import net.minecraft.entity.player.ServerPlayerEntity;
 import net.minecraft.nbt.CompoundNBT;
+import net.minecraft.network.IPacket;
+import net.minecraft.network.PacketBuffer;
+import net.minecraft.network.play.server.SDestroyEntitiesPacket;
+import net.minecraft.network.play.server.SEntityMetadataPacket;
+import net.minecraft.network.play.server.SSetPassengersPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.text.ITextComponent;
 import net.minecraft.world.server.ServerWorld;
+import net.minecraftforge.fml.network.PacketDistributor;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
- * Rank prefixes over players' heads, without scoreboard teams (which another mod on the server
- * keeps clearing) and without a client mod.
+ * Rank prefixes over players' heads, without scoreboard teams and without a client mod.
  *
- * <p>The vanilla nametag itself can only be decorated through a scoreboard team, so the prefix is
- * shown on its own line by invisible label entities that ride the player:
+ * <h2>Why b1-b3 left labels floating in the air</h2>
+ * Up to 1.0.0-b3 the label was a real (server-side) marker armour stand riding the player. For
+ * an entity that is a passenger, the server never sends position updates (vanilla
+ * {@code TrackedEntity} only sends rotation and metadata for passengers): the only thing that
+ * keeps the label in the right place on a client is the client-side "riding" link. That link is
+ * created and destroyed by packets from two <i>independent</i> trackers (the player's and the
+ * label's). Whenever a client lost the link while still knowing the label (the player was
+ * despawned on that client by range, death/respawn, a dimension change, a teleport or a
+ * passenger update from the player's tracker that didn't list the label, or the passenger packet
+ * arrived before the label existed on that client), the client kept a free label that never got
+ * another position update, so it froze in the sky where the link broke. On the server the chain
+ * was still valid, so the old check ({@code chainValid}, server state only) never noticed.
+ *
+ * <h2>How labels work now</h2>
+ * The label entities only exist on the clients. The server creates entity objects for them
+ * (unique entity ids, metadata) but never adds them to a world, so there is nothing to strand,
+ * save, tick or orphan on the server, and other mods never see extra passengers on players.
+ * They are sent with exactly the life cycle of the player as each client sees it:
  * <ul>
- *   <li><b>BELOW</b>: one marker armour stand riding the player. Its name floats about 1.85
- *   blocks above the feet, just under the player's own name.</li>
- *   <li><b>ABOVE</b>: two radius-0 area-effect clouds and a marker armour stand stacked on the
- *   player, so the label sits about 2.6 blocks up, above the player's name.</li>
+ *   <li>when a client starts tracking the player (Forge {@code PlayerEvent.StartTracking}, fired
+ *   after the player's own spawn packets), it receives the label spawn, its metadata and the
+ *   riding links;</li>
+ *   <li>when it stops tracking the player (range, death, respawn, dimension change, logout:
+ *   Forge {@code StopTracking}), it receives the label's destroy packet;</li>
+ *   <li>the riding links are re-sent to everyone tracking the player every 2 seconds and
+ *   whenever the player's real passengers change, so any client-side loss of the link heals
+ *   within 2 seconds (the label can never stay stranded);</li>
+ *   <li>name, animation frames and sneaking visibility are metadata updates to the same
+ *   clients.</li>
  * </ul>
- * Passengers are positioned by every client each frame, so the label follows smoothly. Label
- * entities:
- * <ul>
- *   <li>have no hitbox, so they never block hits, arrows or clicks;</li>
- *   <li>carry the tag {@link #ENTITY_TAG}, and any tagged entity this session didn't create is
- *   refused when it would join a world (leftovers after a crash);</li>
- *   <li>are removed on logout, death, respawn, dimension change and server stop.</li>
- * </ul>
- * Labels hide while the player sneaks or is invisible, and disappear for spectators, dead players
- * and under water (vanilla drops passengers there). Animated gradients are updated by renaming the
- * label, which costs one small entity-metadata packet per frame and only for animated ranks.
+ * BELOW: one marker armour stand riding the player (name about 1.85 blocks up, under the
+ * player's name). ABOVE: two radius-0 area-effect clouds and the stand (name about 2.6 blocks
+ * up, above the player's name). A player never sees their own label (like vanilla nametags).
  */
 public final class NametagDisplay {
+    /** Tag of the real label entities created by 1.0.0-b1 to b3; any such entity is a leftover. */
     public static final String ENTITY_TAG = "grandtab_label";
+    private static final int RELINK_TICKS = 40;
 
     private final MinecraftServer server;
     private final TabService service;
-    private final Map<UUID, State> states = new HashMap<>();
-    private static final Set<UUID> OWN_ENTITIES = new HashSet<>();
+    private final Map<UUID, Label> labels = new HashMap<>();
 
-    private static final class State {
-        String position;
-        final List<Entity> chain = new ArrayList<>();
-        ServerPlayerEntity vehicle;
-        String lastJson;
-        boolean hidden;
-        boolean animated;
-        boolean waterHold;
+    /** A client-side label chain for one player. */
+    private static final class Label {
+        final String position;
+        /** Bottom to top; the last one carries the name. Never added to a world. */
+        final List<Entity> parts;
+        ServerPlayerEntity player;
+        boolean shown;
+        String json;
+        boolean nameVisible = true;
+        List<Integer> realPassengers = new ArrayList<>();
+
+        Label(String position, List<Entity> parts, ServerPlayerEntity player) {
+            this.position = position;
+            this.parts = parts;
+            this.player = player;
+        }
+
+        Entity top() {
+            return parts.get(parts.size() - 1);
+        }
+
+        int[] ids() {
+            int[] ids = new int[parts.size()];
+            for (int i = 0; i < parts.size(); i++) {
+                ids[i] = parts.get(i).getEntityId();
+            }
+            return ids;
+        }
     }
 
     NametagDisplay(MinecraftServer server, TabService service) {
@@ -70,21 +110,28 @@ public final class NametagDisplay {
         return service.config().gradients.nametags;
     }
 
+    // ------------------------------------------------------------------ ticking
+
     void tick(long ticks, boolean refresh, boolean newFrame) {
-        if (!refresh && !newFrame && ticks % 5 != 0) {
+        boolean check = refresh || ticks % 5 == 0;
+        boolean relink = ticks % RELINK_TICKS == 0;
+        if (!check && !newFrame && !relink) {
             return;
         }
         for (ServerPlayerEntity player : server.getPlayerList().getPlayers()) {
-            State state = states.get(player.getUniqueID());
-            boolean render = refresh || (newFrame && state != null && state.animated);
-            if (refresh || ticks % 5 == 0 || render) {
-                apply(player, render);
+            Label label = labels.get(player.getUniqueID());
+            if (check || (newFrame && label != null && label.shown)) {
+                apply(player, refresh || newFrame);
+            }
+            label = labels.get(player.getUniqueID());
+            if (relink && label != null && label.shown) {
+                sendToTrackers(player, links(label, player));
             }
         }
+        labels.keySet().removeIf(id -> server.getPlayerList().getPlayerByUUID(id) == null);
     }
 
     private void apply(ServerPlayerEntity player, boolean render) {
-        State state = states.computeIfAbsent(player.getUniqueID(), k -> new State());
         TabConfig cfg = service.config();
         TabService.Prefix prefix = null;
         if (cfg.enabled && cfg.gradients.enabled && settings().enabled) {
@@ -93,114 +140,87 @@ public final class NametagDisplay {
                 prefix = null;
             }
         }
-        String position = "BELOW".equalsIgnoreCase(settings().position) ? "BELOW" : "ABOVE";
+        Label label = labels.get(player.getUniqueID());
         if (prefix == null) {
-            removeChain(state);
-            state.position = null;
-            return;
-        }
-        if (!position.equals(state.position)) {
-            removeChain(state);
-            state.position = position;
-            render = true;
-        }
-        state.animated = prefix.animated;
-        if (!player.isAlive() || player.isSpectator()) {
-            removeChain(state);
-            return;
-        }
-        if (state.waterHold && !player.isInWater()) {
-            state.waterHold = false;
-        }
-        if (!chainValid(player, state)) {
-            boolean broken = !state.chain.isEmpty() && state.vehicle == player;
-            removeChain(state);
-            if (broken && player.isInWater()) {
-                state.waterHold = true; // vanilla drops passengers under water; retry once out of it
+            if (label != null) {
+                hide(label);
+                labels.remove(player.getUniqueID());
             }
-            if (state.waterHold) {
+            return;
+        }
+        String position = "BELOW".equalsIgnoreCase(settings().position) ? "BELOW" : "ABOVE";
+        if (label == null || !label.position.equals(position) || label.player != player) {
+            if (label != null) {
+                hide(label); // the old player object (respawn) or the old layout
+            }
+            label = create(player, position);
+            if (label == null) {
                 return;
             }
-            spawnChain(player, state, position);
+            labels.put(player.getUniqueID(), label);
             render = true;
         }
-        if (state.chain.isEmpty()) {
+        boolean visible = player.isAlive() && !player.isSpectator() && !player.isInvisible();
+        if (!visible) {
+            hide(label);
             return;
         }
-        Entity label = state.chain.get(state.chain.size() - 1);
-        if (render || state.lastJson == null) {
+        boolean metadataChanged = false;
+        if (render || label.json == null) {
             ITextComponent text = prefix.text;
             String json = ITextComponent.Serializer.toJson(text);
-            if (!json.equals(state.lastJson)) {
-                label.setCustomName(text);
-                state.lastJson = json;
+            if (!json.equals(label.json)) {
+                label.top().setCustomName(text);
+                label.json = json;
+                metadataChanged = true;
             }
         }
-        boolean hidden = player.isSneaking() || player.isInvisible();
-        if (hidden != state.hidden || label.isCustomNameVisible() == hidden) {
-            label.setCustomNameVisible(!hidden);
-            state.hidden = hidden;
+        boolean nameVisible = !player.isSneaking(); // like vanilla: no label through walls while sneaking
+        if (nameVisible != label.nameVisible) {
+            label.top().setCustomNameVisible(nameVisible);
+            label.nameVisible = nameVisible;
+            metadataChanged = true;
+        }
+        if (!label.shown) {
+            sendToTrackers(player, spawn(label, player));
+            label.shown = true;
+            label.realPassengers = realPassengers(player);
+            return;
+        }
+        if (metadataChanged) {
+            sendToTrackers(player, new SEntityMetadataPacket(label.top().getEntityId(), label.top().getDataManager(), true));
+        }
+        List<Integer> real = realPassengers(player);
+        if (!real.equals(label.realPassengers)) {
+            // The player's own tracker just sent its passenger list without the label: re-link.
+            label.realPassengers = real;
+            sendToTrackers(player, links(label, player));
         }
     }
 
-    private static boolean chainValid(ServerPlayerEntity player, State state) {
-        if (state.chain.isEmpty() || state.vehicle != player) {
-            return false;
-        }
-        Entity below = player;
-        for (Entity e : state.chain) {
-            if (!e.isAlive() || e.world != player.world || e.getRidingEntity() != below) {
-                return false;
-            }
-            below = e;
-        }
-        return true;
-    }
+    // ------------------------------------------------------------------ label entities (client-side only)
 
-    private void spawnChain(ServerPlayerEntity player, State state, String position) {
+    private Label create(ServerPlayerEntity player, String position) {
         ServerWorld world = player.getServerWorld();
-        List<Entity> chain = new ArrayList<>();
+        List<Entity> parts = new ArrayList<>();
         if (position.equals("ABOVE")) {
-            chain.add(cloud(world, player));
-            chain.add(cloud(world, player));
+            parts.add(cloud(world));
+            parts.add(cloud(world));
         }
-        chain.add(marker(world, player));
-        for (Entity e : chain) {
+        parts.add(marker(world));
+        for (Entity e : parts) {
             if (e == null) {
-                return;
+                return null;
             }
         }
-        Entity below = player;
-        List<Entity> added = new ArrayList<>();
-        for (Entity e : chain) {
-            synchronized (OWN_ENTITIES) {
-                OWN_ENTITIES.add(e.getUniqueID());
-            }
-            if (!world.addEntity(e)) {
-                for (Entity created : added) {
-                    discard(created);
-                }
-                synchronized (OWN_ENTITIES) {
-                    OWN_ENTITIES.remove(e.getUniqueID());
-                }
-                return;
-            }
-            added.add(e);
-            e.startRiding(below, true);
-            below = e;
-        }
-        state.chain.addAll(chain);
-        state.vehicle = player;
-        state.lastJson = null;
-        state.hidden = false;
+        return new Label(position, parts, player);
     }
 
-    private static ArmorStandEntity marker(ServerWorld world, ServerPlayerEntity player) {
+    private static ArmorStandEntity marker(ServerWorld world) {
         ArmorStandEntity stand = EntityType.ARMOR_STAND.create(world);
         if (stand == null) {
             return null;
         }
-        stand.setPosition(player.getPosX(), player.getPosY() + 1.85, player.getPosZ());
         CompoundNBT nbt = stand.writeWithoutTypeId(new CompoundNBT());
         nbt.putBoolean("Marker", true);
         nbt.putBoolean("Invisible", true);
@@ -208,76 +228,184 @@ public final class NametagDisplay {
         nbt.putBoolean("Invulnerable", true);
         nbt.putBoolean("Silent", true);
         nbt.putBoolean("NoBasePlate", true);
-        nbt.putInt("DisabledSlots", 0x1F1F1F);
         stand.read(nbt);
-        stand.addTag(ENTITY_TAG);
         stand.setCustomNameVisible(true);
         return stand;
     }
 
-    private static AreaEffectCloudEntity cloud(ServerWorld world, ServerPlayerEntity player) {
+    private static AreaEffectCloudEntity cloud(ServerWorld world) {
         AreaEffectCloudEntity cloud = EntityType.AREA_EFFECT_CLOUD.create(world);
         if (cloud == null) {
             return null;
         }
-        cloud.setPosition(player.getPosX(), player.getPosY() + 1.35, player.getPosZ());
         cloud.setRadius(0.0F);
         cloud.setWaitTime(0);
         cloud.setDuration(Integer.MAX_VALUE);
-        cloud.setInvulnerable(true);
         cloud.setSilent(true);
-        cloud.addTag(ENTITY_TAG);
         return cloud;
     }
 
-    private static void discard(Entity e) {
-        if (e != null) {
-            synchronized (OWN_ENTITIES) {
-                OWN_ENTITIES.remove(e.getUniqueID());
-            }
-            e.stopRiding();
-            e.remove();
+    private static List<Integer> realPassengers(ServerPlayerEntity player) {
+        List<Integer> ids = new ArrayList<>();
+        for (Entity e : player.getPassengers()) {
+            ids.add(e.getEntityId());
+        }
+        return ids;
+    }
+
+    /** Riding links: player -> first part (plus the player's real passengers), part -> next part. */
+    private List<IPacket<?>> links(Label label, ServerPlayerEntity player) {
+        List<IPacket<?>> packets = new ArrayList<>();
+        List<Integer> riders = realPassengers(player);
+        riders.add(label.parts.get(0).getEntityId());
+        packets.add(passengers(player.getEntityId(), riders));
+        for (int i = 0; i + 1 < label.parts.size(); i++) {
+            List<Integer> one = new ArrayList<>();
+            one.add(label.parts.get(i + 1).getEntityId());
+            packets.add(passengers(label.parts.get(i).getEntityId(), one));
+        }
+        return packets;
+    }
+
+    private static IPacket<?> passengers(int vehicle, List<Integer> riders) {
+        int[] ids = new int[riders.size()];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = riders.get(i);
+        }
+        PacketBuffer buffer = new PacketBuffer(Unpooled.buffer());
+        SSetPassengersPacket packet = new SSetPassengersPacket();
+        try {
+            buffer.writeVarInt(vehicle);
+            buffer.writeVarIntArray(ids);
+            packet.readPacketData(buffer); // filled through its own decoder: no private fields touched
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        } finally {
+            buffer.release();
+        }
+        return packet;
+    }
+
+    /** Everything a client needs to show the label: spawn, metadata, riding links. */
+    private List<IPacket<?>> spawn(Label label, ServerPlayerEntity player) {
+        List<IPacket<?>> packets = new ArrayList<>();
+        double y = player.getPosY() + player.getHeight();
+        for (Entity part : label.parts) {
+            part.setPosition(player.getPosX(), y, player.getPosZ()); // only the first frame; riding takes over
+            packets.add(part.createSpawnPacket());
+            packets.add(new SEntityMetadataPacket(part.getEntityId(), part.getDataManager(), true));
+        }
+        packets.addAll(links(label, player));
+        return packets;
+    }
+
+    private void hide(Label label) {
+        if (label.shown) {
+            sendToTrackers(label.player, new SDestroyEntitiesPacket(label.ids()));
+            label.shown = false;
         }
     }
 
-    private static void removeChain(State state) {
-        for (int i = state.chain.size() - 1; i >= 0; i--) {
-            discard(state.chain.get(i));
+    private static void sendToTrackers(ServerPlayerEntity player, IPacket<?> packet) {
+        PacketDistributor.TRACKING_ENTITY.with(() -> player).send(packet);
+    }
+
+    private static void sendToTrackers(ServerPlayerEntity player, List<IPacket<?>> packets) {
+        for (IPacket<?> p : packets) {
+            sendToTrackers(player, p);
         }
-        state.chain.clear();
-        state.vehicle = null;
-        state.lastJson = null;
+    }
+
+    // ------------------------------------------------------------------ events
+
+    /** A client starts seeing {@code target} (sent after the target's own spawn packets). */
+    public void onStartTracking(ServerPlayerEntity observer, Entity target) {
+        if (!(target instanceof ServerPlayerEntity)) {
+            return;
+        }
+        Label label = labels.get(target.getUniqueID());
+        if (label != null && label.shown && label.player == target) {
+            for (IPacket<?> p : spawn(label, (ServerPlayerEntity) target)) {
+                observer.connection.sendPacket(p);
+            }
+        }
+    }
+
+    /** A client stops seeing {@code target}: its label must go with it on that client. */
+    public void onStopTracking(ServerPlayerEntity observer, Entity target) {
+        if (!(target instanceof ServerPlayerEntity)) {
+            return;
+        }
+        Label label = labels.get(target.getUniqueID());
+        if (label != null && label.player == target) {
+            observer.connection.sendPacket(new SDestroyEntitiesPacket(label.ids()));
+        }
     }
 
     void onLogout(ServerPlayerEntity player) {
-        State state = states.remove(player.getUniqueID());
-        if (state != null) {
-            removeChain(state);
+        Label label = labels.remove(player.getUniqueID());
+        if (label != null) {
+            hide(label);
         }
     }
 
-    /** Death, respawn or dimension change: labels are rebuilt on the next check. */
+    /** Death, respawn or dimension change: re-checked on the next tick. */
     public void onPlayerChanged(ServerPlayerEntity player) {
-        State state = states.get(player.getUniqueID());
-        if (state != null) {
-            removeChain(state);
+        Label label = labels.get(player.getUniqueID());
+        if (label != null && (!player.isAlive() || label.player != player)) {
+            hide(label);
         }
     }
 
     void stop() {
-        for (State state : states.values()) {
-            removeChain(state);
+        for (Label label : labels.values()) {
+            hide(label);
         }
-        states.clear();
+        labels.clear();
     }
 
-    /** True for a label entity this session didn't create (left over from a crash). */
-    public static boolean isStray(Entity entity) {
-        if (!entity.getTags().contains(ENTITY_TAG)) {
-            return false;
+    /** Number of labels currently shown (for /tabrank info). */
+    public int shownLabels() {
+        int n = 0;
+        for (Label label : labels.values()) {
+            if (label.shown) {
+                n++;
+            }
         }
-        synchronized (OWN_ENTITIES) {
-            return !OWN_ENTITIES.contains(entity.getUniqueID());
+        return n;
+    }
+
+    // ------------------------------------------------------------------ leftovers of b1-b3
+
+    /**
+     * True for a real label entity created by 1.0.0-b1 to b3. This version creates none, so every
+     * such entity is a leftover. Only marker armour stands and area-effect clouds that carry this
+     * mod's tag match: other mods' or players' armour stands are never touched.
+     */
+    public static boolean isLeftover(Entity entity) {
+        return (entity instanceof ArmorStandEntity || entity instanceof AreaEffectCloudEntity)
+                && entity.getTags().contains(ENTITY_TAG);
+    }
+
+    /** Removes leftover label entities from all loaded worlds. Returns how many were removed. */
+    public int removeLeftovers() {
+        int removed = 0;
+        for (ServerWorld world : server.getWorlds()) {
+            List<Entity> found = new ArrayList<>();
+            world.getEntities().forEach(e -> {
+                if (isLeftover(e)) {
+                    found.add(e);
+                }
+            });
+            for (Entity e : found) {
+                e.stopRiding();
+                e.remove();
+                removed++;
+            }
         }
+        if (removed > 0) {
+            GrandTab.LOG.info("Grand Tab: removed {} leftover label entities from older versions", removed);
+        }
+        return removed;
     }
 }

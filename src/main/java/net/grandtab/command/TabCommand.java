@@ -40,6 +40,7 @@ import java.util.UUID;
  * /tabrank role &lt;id&gt; name|color &lt;value&gt; | role &lt;id&gt; bold true|false
  * /tabrank title|subtitle|discord|website &lt;text&gt;
  * /tabrank source tabrank|serverutilities|both
+ * /tabrank cleanup                         remove floating labels left by 1.0.0-b1 to b3
  * /tabrank enable | disable | reload | version
  * </pre>
  * Changes are saved to config/grandtab immediately and shown within a second.
@@ -114,6 +115,7 @@ public final class TabCommand {
                 .then(Commands.literal("enable").executes(ctx -> setEnabled(ctx, true)))
                 .then(Commands.literal("disable").executes(ctx -> setEnabled(ctx, false)))
                 .then(Commands.literal("reload").executes(TabCommand::reload))
+                .then(Commands.literal("cleanup").executes(TabCommand::cleanup))
                 .then(Commands.literal("version").executes(ctx -> ok(ctx, "Grand Tab List " + GrandTab.version()))));
     }
 
@@ -331,6 +333,17 @@ public final class TabCommand {
     private static int setEnabled(CommandContext<CommandSource> ctx, boolean enabled) {
         GrandTab.store().config().enabled = enabled;
         return saved(ctx, enabled ? "Custom tab list enabled." : "Custom tab list disabled (vanilla tab list).");
+    }
+
+    /** Removes real label entities left by 1.0.0-b1 to b3 (only those carrying this mod's tag). */
+    private static int cleanup(CommandContext<CommandSource> ctx) {
+        TabService service = GrandTab.service();
+        if (service == null || service.nametags() == null) {
+            return fail(ctx, "The tab list is not running.");
+        }
+        int removed = service.nametags().removeLeftovers();
+        return ok(ctx, removed == 0 ? "No leftover label entities in loaded chunks."
+                : "Removed " + removed + " leftover label entities (from versions before 1.0.0-b4).");
     }
 
     private static int reload(CommandContext<CommandSource> ctx) {

@@ -99,11 +99,30 @@ public final class TabEvents {
         }
     }
 
-    /** Label entities left in a chunk or player file by a crash are refused. */
+    /**
+     * Real label entities were only created by 1.0.0-b1 to b3; any that is loaded from a chunk now
+     * is a leftover and is refused. Only armour stands / area-effect clouds with this mod's tag.
+     */
     @SubscribeEvent
     public void onEntityJoin(EntityJoinWorldEvent event) {
-        if (!event.getWorld().isRemote() && NametagDisplay.isStray(event.getEntity())) {
+        if (!event.getWorld().isRemote() && NametagDisplay.isLeftover(event.getEntity())) {
             event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public void onStartTracking(PlayerEvent.StartTracking event) {
+        TabService service = GrandTab.service();
+        if (service != null && service.nametags() != null && event.getPlayer() instanceof ServerPlayerEntity) {
+            service.nametags().onStartTracking((ServerPlayerEntity) event.getPlayer(), event.getTarget());
+        }
+    }
+
+    @SubscribeEvent
+    public void onStopTracking(PlayerEvent.StopTracking event) {
+        TabService service = GrandTab.service();
+        if (service != null && service.nametags() != null && event.getPlayer() instanceof ServerPlayerEntity) {
+            service.nametags().onStopTracking((ServerPlayerEntity) event.getPlayer(), event.getTarget());
         }
     }
 
